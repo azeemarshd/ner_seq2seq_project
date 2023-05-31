@@ -5,8 +5,10 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from datasets import load_dataset
 from collections import Counter
-from src.utils.conlleval import evaluate
+from src.utils.conlleval import *
 
+
+# ---------------- Classes ----------------
 
 
 # --- defining a TransformerBlock layer
@@ -74,11 +76,29 @@ class NERModel(keras.Model):
         x = self.ff_final(x)
         return x
 
+class CustomNonPaddingTokenLoss(keras.losses.Loss):
+    def __init__(self, name="custom_ner_loss"):
+        super().__init__(name=name)
 
-# Load the CoNLL 2003 dataset from the datasets library and process it
-conll_data = load_dataset("conll2003")
+    def call(self, y_true, y_pred):
+        loss_fn = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=None, reduction=keras.losses.Reduction.NONE
+        )
+        loss = loss_fn(y_true, y_pred)
+        mask = tf.cast((y_true > 0), dtype=tf.float32)
+        loss = loss * mask
+        return tf.reduce_sum(loss) / tf.reduce_sum(mask)
 
 
+# ---------------- Helper Functions ----------------
+
+def load_and_prepare_data():
+    conll_data = load_dataset("conll2003")
+    if not os.path.exists("./data"):
+        os.mkdir("./data")
+    export_to_file("./data/conll_train.txt", conll_data["train"])
+    export_to_file("./data/conll_val.txt", conll_data["validation"])
+    return conll_data
 
 def export_to_file(export_file_path, data):
     with open(export_file_path, "w") as f:
@@ -94,18 +114,11 @@ def export_to_file(export_file_path, data):
                     + "\t".join(map(str, ner_tags))
                     + "\n"
                 )
-
-
-# create a folder data if it does not exist in root directory
-if not os.path.exists("./data"):
-    os.mkdir("./data")
-
-export_to_file("./data/conll_train.txt", conll_data["train"])
-export_to_file("./data/conll_val.txt", conll_data["validation"])
-
-
-
-# Make the NER label lookup table
+                
+                
+def prepare_data_directory():
+    if not os.path.exists("./data"):
+        os.mkdir("./data")
 
 def make_tag_lookup_table():
     iob_labels = ["B", "I"]
@@ -116,42 +129,21 @@ def make_tag_lookup_table():
     return dict(zip(range(0, len(all_labels) + 1), all_labels))
 
 
-mapping = make_tag_lookup_table()
-# print(mapping)
+def get_vocabulary(conll_data, vocab_size):
+    all_tokens = sum(conll_data["train"]["tokens"], [])
+    all_tokens_array = np.array(list(map(str.lower, all_tokens)))
+    counter = Counter(all_tokens_array)
+    vocabulary = [token for token, count in counter.most_common(vocab_size - 2)]
+    return vocabulary
 
+def tokenize_and_convert_to_ids(text, lookup_layer):
+    tokens = text.split()
+    tokens = tf.strings.lower(tokens)
+    return lookup_layer(tokens)
 
-
-# -------- Get a list of all tokens in the training dataset. This will be used to create the vocabulary.
-
-all_tokens = sum(conll_data["train"]["tokens"], [])
-all_tokens_array = np.array(list(map(str.lower, all_tokens)))
-
-counter = Counter(all_tokens_array)
-print(len(counter))
-
-num_tags = len(mapping)
-vocab_size = 20000
-
-# We only take (vocab_size - 2) most commons words from the training data since
-# the `StringLookup` class uses 2 additional tokens - one denoting an unknown
-# token and another one denoting a masking token
-vocabulary = [token for token, count in counter.most_common(vocab_size - 2)]
-
-# The StringLook class will convert tokens to token IDs
-lookup_layer = keras.layers.StringLookup(
-    vocabulary=vocabulary
-)
-
-
-train_data = tf.data.TextLineDataset("./data/conll_train.txt")
-val_data = tf.data.TextLineDataset("./data/conll_val.txt")
-
-
-# print(list(train_data.take(1).as_numpy_iterator()))
-
-
-
-# ------------ map function to transform the data in the dataset
+def lowercase_and_convert_to_ids(tokens, lookup_layer):
+    tokens = tf.strings.lower(tokens)
+    return lookup_layer(tokens)
 
 def map_record_to_training_data(record):
     record = tf.strings.split(record, sep="\t")
@@ -162,84 +154,48 @@ def map_record_to_training_data(record):
     tags += 1
     return tokens, tags
 
+def prepare_datasets(vocabulary, batch_size):
+    lookup_layer = keras.layers.StringLookup(vocabulary=vocabulary)
+    train_data = tf.data.TextLineDataset("./data/conll_train.txt")
+    val_data = tf.data.TextLineDataset("./data/conll_val.txt")
+    train_dataset = (
+        train_data.map(map_record_to_training_data)
+        .map(lambda x, y: (lowercase_and_convert_to_ids(x, lookup_layer), y))
+        .padded_batch(batch_size)
+    )
+    val_dataset = (
+        val_data.map(map_record_to_training_data)
+        .map(lambda x, y: (lowercase_and_convert_to_ids(x, lookup_layer), y))
+        .padded_batch(batch_size)
+    )
+    return train_dataset, val_dataset
 
-def lowercase_and_convert_to_ids(tokens):
-    tokens = tf.strings.lower(tokens)
-    return lookup_layer(tokens)
+# ---------------- Model: Training and Predicting ----------------
 
+def create_model(num_tags, vocab_size):
+    ner_model = NERModel(num_tags, vocab_size, embed_dim=32, num_heads=4, ff_dim=64)
+    return ner_model
 
-# We use `padded_batch` here because each record in the dataset has a
-# different length.
-batch_size = 32
-train_dataset = (
-    train_data.map(map_record_to_training_data)
-    .map(lambda x, y: (lowercase_and_convert_to_ids(x), y))
-    .padded_batch(batch_size)
-)
-val_dataset = (
-    val_data.map(map_record_to_training_data)
-    .map(lambda x, y: (lowercase_and_convert_to_ids(x), y))
-    .padded_batch(batch_size)
-)
+def compile_and_fit(model, train_dataset, epochs=10):
+    loss = CustomNonPaddingTokenLoss()
+    model.compile(optimizer="adam", loss=loss)
+    model.fit(train_dataset, epochs=epochs)
 
-ner_model = NERModel(num_tags, vocab_size, embed_dim=32, num_heads=4, ff_dim=64)
+def predict_sample(model, text, mapping, lookup_layer):
+    sample_input = tokenize_and_convert_to_ids(text, lookup_layer)
+    sample_input = tf.reshape(sample_input, shape=[1, -1])
+    output = model.predict(sample_input)
+    prediction = np.argmax(output, axis=-1)[0]
+    prediction = [mapping[i] for i in prediction]
+    return prediction
 
+# ---------------- Model: Evaluation ----------------
 
-
-
-# ------------- custom loss function that will ignore the loss from padded tokens
-class CustomNonPaddingTokenLoss(keras.losses.Loss):
-    def __init__(self, name="custom_ner_loss"):
-        super().__init__(name=name)
-
-    def call(self, y_true, y_pred):
-        loss_fn = keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True, reduction=keras.losses.Reduction.NONE
-        )
-        loss = loss_fn(y_true, y_pred)
-        mask = tf.cast((y_true > 0), dtype=tf.float32)
-        loss = loss * mask
-        return tf.reduce_sum(loss) / tf.reduce_sum(mask)
-
-
-loss = CustomNonPaddingTokenLoss()
-
-
-
-# ----- Compile and fit the model
-
-ner_model.compile(optimizer="adam", loss=loss)
-ner_model.fit(train_dataset, epochs=10)
-
-
-def tokenize_and_convert_to_ids(text):
-    tokens = text.split()
-    return lowercase_and_convert_to_ids(tokens)
-
-
-# Sample inference using the trained model
-sample_input = tokenize_and_convert_to_ids(
-    "eu rejects german call to boycott british lamb"
-)
-sample_input = tf.reshape(sample_input, shape=[1, -1])
-print(sample_input)
-
-output = ner_model.predict(sample_input)
-prediction = np.argmax(output, axis=-1)[0]
-prediction = [mapping[i] for i in prediction]
-
-# eu -> B-ORG, german -> B-MISC, british -> B-MISC
-print(prediction)
-
-
-
-
-# --- Metrics calculation
-def calculate_metrics(dataset):
+def calculate_metrics(dataset, ner_model, mapping):
     all_true_tag_ids, all_predicted_tag_ids = [], []
-
+    
     for x, y in dataset:
-        output = ner_model.predict(x)
+        output = ner_model.predict(x, verbose=0)  # set verbose to 0
         predictions = np.argmax(output, axis=-1)
         predictions = np.reshape(predictions, [-1])
 
@@ -257,8 +213,58 @@ def calculate_metrics(dataset):
 
     predicted_tags = [mapping[tag] for tag in all_predicted_tag_ids]
     real_tags = [mapping[tag] for tag in all_true_tag_ids]
+    
+    res = evaluate(real_tags, predicted_tags, verbose = False)
 
-    evaluate(real_tags, predicted_tags)
+    return res
 
 
-# calculate_metrics(val_dataset)
+
+def main():
+
+    vocab_size = 20000
+    batch_size = 32
+    epochs = 2
+    sample_text = "eu rejects german call to boycott british lamb"
+    
+    
+    print(f"processing data and preparing vocabulary of size {vocab_size}...")    
+    conll_data = load_and_prepare_data()
+
+    mapping = make_tag_lookup_table()
+
+    # vocab_size = 20000
+    vocabulary = get_vocabulary(conll_data, vocab_size)
+
+    print(f"preparing datasets...")
+    lookup_layer = keras.layers.StringLookup(vocabulary=vocabulary)
+
+    # batch_size = 32
+    train_dataset, val_dataset = prepare_datasets(vocabulary, batch_size)
+
+    num_tags = len(mapping)
+    
+    print(f"creating model...\n")
+    ner_model = create_model(num_tags, vocab_size)
+
+    print(f"training model...\n")
+    compile_and_fit(ner_model, train_dataset, epochs=epochs)
+
+    print(predict_sample(ner_model, sample_text, mapping, lookup_layer))
+    
+    print(f"calculating metrics...\n")
+    res = calculate_metrics(val_dataset, ner_model, mapping, verbose = True)
+    
+    # res is a tuple of (precision, recall, f1), print it out beautifully
+    print("\n")
+    print(f"precision: \t{res[0]:.2f}")
+    print(f"   recall: \t{res[1]:.2f}")
+    print(f"       f1: \t{res[2]:.2f}")
+        
+    return res
+    
+    
+
+
+
+
