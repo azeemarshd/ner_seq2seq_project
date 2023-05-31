@@ -7,7 +7,7 @@ In this assignment we will put together various steps involved in sequence-to-se
 - Establish the baseline performance with a pre-neural tool
 - Establish the baseline performance with a neural tool
 - Analyse system outputs
-- Propose and evaluate and improvement over both baselines
+- Propose and evaluate improvements over both baselines
 
 _*Data set*_ : CoNLL2003 
 
