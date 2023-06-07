@@ -27,8 +27,6 @@ from transformers import AutoTokenizer, BertTokenizerFast, TFAutoModel
 
 
 
-from src.bilstm_models import *
-
 # --------------- GLOBAL VARIABLES
 tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
 chars = string.ascii_lowercase + string.ascii_uppercase + string.digits + string.punctuation
