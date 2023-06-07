@@ -57,11 +57,19 @@ class TokenAndPositionEmbedding(layers.Layer):
 # --- Build the NER model class as a keras.Model subclass
 class NERModel(keras.Model):
     def __init__(
-        self, num_tags, vocab_size, maxlen=128, embed_dim=32, num_heads=2, ff_dim=32
+        self, num_tags,
+        vocab_size,
+        maxlen=128,
+        # embed_dim=32,
+        embed_dim=128,
+        # num_heads=2,
+        num_heads=8,
+        ff_dim=32,
+        num_transformer_layers=5
     ):
         super().__init__()
         self.embedding_layer = TokenAndPositionEmbedding(maxlen, vocab_size, embed_dim)
-        self.transformer_block = TransformerBlock(embed_dim, num_heads, ff_dim)
+        self.transformer_blocks = [TransformerBlock(embed_dim, num_heads, ff_dim) for _ in range(num_transformer_layers)]
         self.dropout1 = layers.Dropout(0.1)
         self.ff = layers.Dense(ff_dim, activation="relu")
         self.dropout2 = layers.Dropout(0.1)
@@ -69,12 +77,14 @@ class NERModel(keras.Model):
 
     def call(self, inputs, training=False):
         x = self.embedding_layer(inputs)
-        x = self.transformer_block(x)
+        for transformer_block in self.transformer_blocks:
+            x = transformer_block(x)
         x = self.dropout1(x, training=training)
         x = self.ff(x)
         x = self.dropout2(x, training=training)
         x = self.ff_final(x)
         return x
+
 
 class CustomNonPaddingTokenLoss(keras.losses.Loss):
     def __init__(self, name="custom_ner_loss"):
@@ -191,7 +201,7 @@ def predict_sample(model, text, mapping, lookup_layer):
 
 # ---------------- Model: Evaluation ----------------
 
-def calculate_metrics(dataset, ner_model, mapping,verbose=False):
+def calculate_metrics(dataset, ner_model, mapping, verbose=False):
     all_true_tag_ids, all_predicted_tag_ids = [], []
     
     for x, y in dataset:
@@ -224,7 +234,7 @@ def main():
 
     vocab_size = 20000
     batch_size = 32
-    epochs = 2
+    epochs = 15
     sample_text = "eu rejects german call to boycott british lamb"
     
     
